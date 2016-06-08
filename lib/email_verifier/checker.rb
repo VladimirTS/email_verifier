@@ -7,17 +7,27 @@ class EmailVerifier::Checker
   # Returns server object for given email address or throws exception
   # Object returned isn't yet connected. It has internally a list of 
   # real mail servers got from MX dns lookup
-  def initialize(address)
-    @email   = address
-    _, @domain  = address.split("@")
-    @servers = list_mxs @domain
-    raise EmailVerifier::NoMailServerException.new("No mail server for #{address}") if @servers.empty?
-    @smtp    = nil
+  def initialize(address, params = {})
+    if params[:emails]
+      @emails = params[:emails]
+      @email   = address
+      @domain = params[:domain]
+      @servers = list_mxs @domain
+      @smtp    = nil
+      @user_email = EmailVerifier.config.verifier_email
+      _, @user_domain = @user_email.split("@")
+    else
+      @email   = address
+      _, @domain  = address.split("@")
+      @servers = list_mxs @domain
+      #raise EmailVerifier::NoMailServerException.new("No mail server for #{address}") if @servers.empty?
+      @smtp    = nil
 
-    # this is because some mail servers won't give any info unless 
-    # a real user asks for it:
-    @user_email = EmailVerifier.config.verifier_email
-    _, @user_domain = @user_email.split "@"
+      # this is because some mail servers won't give any info unless
+      # a real user asks for it:
+      @user_email = EmailVerifier.config.verifier_email
+      _, @user_domain = @user_email.split "@"
+    end
   end
 
   def list_mxs(domain)
@@ -40,7 +50,7 @@ class EmailVerifier::Checker
     begin
       server = next_server
       raise EmailVerifier::OutOfMailServersException.new("Unable to connect to any one of mail servers for #{@email}") if server.nil?
-      @smtp = Net::SMTP.start server[:address], 25, @user_domain
+      @smtp = MySmtp.start server[:address], 25, @user_domain
       return true
     rescue EmailVerifier::OutOfMailServersException => e
       raise EmailVerifier::OutOfMailServersException, e.message
@@ -55,8 +65,14 @@ class EmailVerifier::Checker
 
   def verify
     self.mailfrom @user_email
-    self.rcptto(@email).tap do
-      close_connection
+    if @emails.present?
+      self.rcptto_list(@emails).tap do
+        close_connection
+      end
+    else
+      self.rcptto(@email).tap do
+        close_connection
+      end
     end
   end
 
@@ -84,6 +100,21 @@ class EmailVerifier::Checker
     end
   end
 
+
+  def rcptto_list(addresses)
+    ensure_connected
+
+    begin
+      @smtp.check_emails(addresses)
+    rescue => e
+      if e.message[/^550/]
+        return false
+      else
+        raise EmailVerifier::FailureException.new(e.message)
+      end
+    end
+  end
+
   def ensure_connected
     raise EmailVerifier::NotConnectedException.new("You have to connect first") if @smtp.nil?
   end
@@ -94,5 +125,24 @@ class EmailVerifier::Checker
     else
       raise EmailVerifier::FailureException.new "Mail server responded with #{smtp_return.status} when we were expecting 250"
     end
+  end
+end
+
+class MySmtp < Net::SMTP
+
+  def check_emails(to_addrs)
+    ok_users = []
+    unknown_users = []
+    to_addrs.flatten.each do |addr|
+      begin
+        rcptto addr
+      rescue Net::SMTPFatalError => e
+        unknown_users << addr.dump
+      else
+        ok_users << addr
+      end
+    end
+
+    {ok_users: ok_users, unknown_users: unknown_users}
   end
 end

@@ -15,9 +15,9 @@ module EmailVerifier
     end
   end
 
-  def self.check(email)
+  def self.check(email, params)
     return true if config.test_mode
-    v = EmailVerifier::Checker.new(email)
+    v = EmailVerifier::Checker.new(email, params)
     v.connect
     v.verify
   end
